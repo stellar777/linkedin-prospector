@@ -1,0 +1,38 @@
+# LinkedIn Prospector Configuration
+# ----------------------------------
+# Fill in your API keys and choose a storage backend.
+# Edit default filters to match your targeting preferences.
+
+# Vayne API (required for scraping)
+# Get your token from https://www.vayne.io -> API Settings
+vayne_api_token: "your-vayne-token-here"
+
+# Storage Backend: "csv" | "supabase" | "sheets"
+storage: "csv"
+
+# CSV config (if storage: "csv")
+csv_output_dir: "./output"
+
+# Supabase config (if storage: "supabase")
+supabase_url: ""
+supabase_key: ""
+supabase_table: "search_filters"
+
+# Google Sheets config (if storage: "sheets")
+google_credentials_path: ""
+spreadsheet_id: ""
+
+# Default filters — applied to every Sales Nav URL unless overridden
+defaults:
+  headcount:
+    - "11-50"
+    - "51-200"
+    - "201-500"
+  seniority:
+    - "Director"
+    - "VP"
+    - "CXO"
+    - "Owner"
+  region: "US"
+  max_results_per_url: 5000
+  min_results_per_url: 100
