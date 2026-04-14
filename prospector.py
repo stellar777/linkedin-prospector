@@ -17,11 +17,22 @@ import csv
 import io
 import json
 import sys
+import time
 from datetime import datetime, timezone
 
-from url_builder import build_sales_nav_url
+from url_builder import build_sales_nav_url, US_STATES, POSTED_ON_LINKEDIN_FILTER
 from vayne_client import VayneClient
 from adapters import load_adapter
+
+
+# Vayne /api/url_checks rate limit is 10 req/min. Sleep between checks to
+# stay well under. Increase if you hit 429s.
+URL_CHECK_SLEEP_SECONDS = 6.5
+
+# Cap on how many URL-check API calls a single cmd_check run can make.
+# Prevents a pathological cascade (broad niche + deep splits) from eating
+# 30+ minutes of rate-limited calls.
+MAX_URL_CHECKS_PER_RUN = 250
 
 
 def load_yaml_config(config_path: str) -> dict:
@@ -99,8 +110,122 @@ def _parse_simple_yaml(config_path: str) -> dict:
     return config
 
 
+def _pick_next_axis(filters: dict) -> str | None:
+    """Return the next axis to split on, or None if the cascade is exhausted.
+
+    Order matches the manual workflow: headcount → region → posted filter.
+    """
+    if len(filters["headcount"]) > 1:
+        return "headcount"
+    if len(filters["regions"]) == 1 and filters["regions"][0] == "US":
+        return "region"
+    if not filters.get("posted", False) and POSTED_ON_LINKEDIN_FILTER is not None:
+        return "posted"
+    return None
+
+
+def _split_axis(filters: dict, axis: str) -> list[dict]:
+    """Return a list of new filter configs split along `axis`."""
+    if axis == "headcount":
+        return [{**filters, "headcount": [hc]} for hc in filters["headcount"]]
+    if axis == "region":
+        return [{**filters, "regions": [state]} for state in US_STATES]
+    if axis == "posted":
+        return [{**filters, "posted": True}]
+    return [filters]
+
+
+def _variant_label(filters: dict, seed_headcount: list, seed_regions: list) -> str:
+    """Human-readable suffix for a narrowed variant (e.g. '11-50_US-CA_posted')."""
+    parts = []
+    if len(filters["headcount"]) == 1 and len(seed_headcount) > 1:
+        parts.append(filters["headcount"][0])
+    if filters["regions"] != seed_regions:
+        parts.append(filters["regions"][0])
+    if filters.get("posted"):
+        parts.append("posted")
+    return "_".join(parts)
+
+
+def _check_and_narrow(
+    filters: dict,
+    vayne: VayneClient,
+    max_results: int,
+    min_results: int,
+    budget: dict,
+    depth: int = 0,
+    max_depth: int = 3,
+) -> list[dict]:
+    """Recursively check a filter config, splitting when count > max_results.
+
+    Returns a flat list of filter configs, each tagged with:
+      status ∈ {good, too_narrow, exhausted, error, budget_exceeded}
+      count  — Vayne count (or -1 on error)
+      sales_nav_url — the built URL
+    """
+    if budget["checks_used"] >= budget["max_checks"]:
+        return [{**filters, "count": -1, "sales_nav_url": None, "status": "budget_exceeded"}]
+
+    try:
+        url = build_sales_nav_url(
+            keywords=filters["keywords"],
+            regions=filters["regions"],
+            seniority=filters.get("seniority"),
+            headcount=filters["headcount"],
+            posted_on_linkedin=filters.get("posted", False),
+        )
+    except ValueError as e:
+        return [{**filters, "count": -1, "sales_nav_url": None,
+                 "status": "error", "error": str(e)}]
+
+    count = vayne.check_url(url)
+    budget["checks_used"] += 1
+    time.sleep(URL_CHECK_SLEEP_SECONDS)
+
+    result = {**filters, "count": count, "sales_nav_url": url}
+
+    if count < 0:
+        result["status"] = "error"
+        return [result]
+    if count < min_results:
+        result["status"] = "too_narrow"
+        return [result]
+    if count <= max_results:
+        result["status"] = "good"
+        return [result]
+
+    # count > max_results — try to narrow
+    if depth >= max_depth:
+        result["status"] = "exhausted"
+        return [result]
+
+    next_axis = _pick_next_axis(filters)
+    if next_axis is None:
+        result["status"] = "exhausted"
+        return [result]
+
+    indent = "  " * (depth + 1)
+    print(f"  {indent}{count:>7,} too broad → splitting by {next_axis}")
+
+    results = []
+    for branch in _split_axis(filters, next_axis):
+        branch_results = _check_and_narrow(
+            branch, vayne, max_results, min_results,
+            budget, depth=depth + 1, max_depth=max_depth,
+        )
+        results.extend(branch_results)
+    return results
+
+
 def cmd_check(args):
-    """Check counts for sub-niches."""
+    """Check counts for sub-niches with auto-cascade narrowing.
+
+    For each sub-niche:
+      1. Build a URL with the default filters and check the count
+      2. If count > max_results, recursively narrow:
+         headcount split → US state split → posted filter
+      3. Return the flat list of in-range (or flagged) URLs
+    """
     config = load_yaml_config(args.config)
     defaults = config.get("defaults", {})
 
@@ -120,16 +245,20 @@ def cmd_check(args):
 
     vayne = VayneClient(token=config.get("vayne_api_token"))
 
-    results = []
     regions = [region] if isinstance(region, str) else region
 
-    print(f"\nNiche: {niche}")
-    print(f"Anchor keywords: {anchor_keywords}")
-    print(f"Region: {', '.join(regions)}")
+    print(f"\nNiche:     {niche}")
+    print(f"Region:    {', '.join(regions)}")
     print(f"Headcount: {', '.join(headcount)}")
     print(f"Seniority: {', '.join(seniority)}")
-    print(f"\n{'Sub-niche':<30} {'Count':>8}  Status")
-    print("-" * 60)
+    print(f"Target:    {min_results:,}–{max_results:,} results per URL")
+    if POSTED_ON_LINKEDIN_FILTER is None:
+        print("Note:      POSTED_ON_LINKEDIN filter not wired — cascade stops at region split.")
+        print("           Run: python3 url_builder.py extract-filter '<url>' to enable.")
+    print()
+
+    budget = {"checks_used": 0, "max_checks": MAX_URL_CHECKS_PER_RUN}
+    all_results = []
 
     for sn in sub_niches:
         sub_niche_name = sn["sub_niche"]
@@ -137,43 +266,60 @@ def cmd_check(args):
 
         key = f"{niche}_{sub_niche_name}"
         if key in already_scraped:
-            print(f"  {sub_niche_name:<28} {'SKIP':>8}  already scraped")
+            print(f"  [skip] {sub_niche_name} — already scraped")
             continue
 
         combined_keywords = f'{anchor_keywords} AND ({sub_keywords})'
 
-        url = build_sales_nav_url(
-            keywords=combined_keywords,
-            regions=regions,
-            seniority=seniority,
-            headcount=headcount,
-        )
-
-        count = vayne.check_url(url)
-
-        if count < 0:
-            status_label = "ERROR"
-        elif count > max_results:
-            status_label = "too broad — split by state or tighten filters"
-        elif count < min_results:
-            status_label = "too narrow — broaden keywords"
-        else:
-            status_label = "good"
-
-        print(f"  {sub_niche_name:<28} {count:>8,}  {status_label}")
-
-        results.append({
+        print(f"  [{sub_niche_name}]")
+        seed = {
             "niche": niche,
             "sub_niche": sub_niche_name,
             "keywords": combined_keywords,
-            "sales_nav_url": url,
-            "region": ",".join(regions),
-            "expected_results": count,
-            "actual_scraped": 0,
-            "status": "counted",
-        })
+            "regions": list(regions),
+            "headcount": list(headcount),
+            "seniority": list(seniority),
+            "posted": False,
+        }
 
-    print(f"\n{json.dumps(results, indent=2)}")
+        narrowed = _check_and_narrow(seed, vayne, max_results, min_results, budget)
+
+        for r in narrowed:
+            suffix = _variant_label(r, headcount, regions)
+            effective_sub = f"{sub_niche_name}__{suffix}" if suffix else sub_niche_name
+            effective_sub = effective_sub.replace("/", "_")
+
+            all_results.append({
+                "niche": niche,
+                "sub_niche": effective_sub,
+                "keywords": r["keywords"],
+                "sales_nav_url": r.get("sales_nav_url"),
+                "region": ",".join(r["regions"]),
+                "headcount": ",".join(r["headcount"]),
+                "posted_filter": r.get("posted", False),
+                "expected_results": r["count"],
+                "actual_scraped": 0,
+                "status": r["status"],
+            })
+
+    # Summary table
+    print(f"\n{'─' * 78}")
+    print(f"{'Sub-niche':<52} {'Count':>10}  Status")
+    print("─" * 78)
+    for r in all_results:
+        status = r["status"]
+        count_str = f"{r['expected_results']:,}" if r['expected_results'] >= 0 else "—"
+        label = r["sub_niche"][:50]
+        print(f"  {label:<50} {count_str:>10}  {status}")
+
+    good_count = sum(1 for r in all_results if r["status"] == "good")
+    broad_count = sum(1 for r in all_results if r["status"] == "exhausted")
+    narrow_count = sum(1 for r in all_results if r["status"] == "too_narrow")
+    error_count = sum(1 for r in all_results if r["status"] in ("error", "budget_exceeded"))
+
+    print(f"\n{good_count} good / {broad_count} still too broad / {narrow_count} too narrow / {error_count} errored")
+    print(f"Vayne URL checks used: {budget['checks_used']}")
+    print(f"\n{json.dumps(all_results, indent=2)}")
 
 
 def cmd_scrape(args):

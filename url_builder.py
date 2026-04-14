@@ -19,6 +19,31 @@ import re
 from urllib.parse import unquote
 
 
+# US states used by the auto-cascade when a US-wide URL returns > 5K results.
+# Covers the top ~16 states by population. Edit to add more if needed.
+US_STATES = [
+    "US-CA", "US-TX", "US-NY", "US-FL", "US-IL", "US-PA", "US-OH",
+    "US-GA", "US-NC", "US-MI", "US-NJ", "US-VA", "US-WA", "US-AZ",
+    "US-MA", "US-CO",
+]
+
+# ── Posted on LinkedIn filter ─────────────────────────────────────────
+#
+# Sales Nav has a "Posted on LinkedIn" filter that narrows to people who
+# have posted recently. It's the last-resort narrower in the auto-cascade
+# when headcount + region splits still leave a URL > 5K.
+#
+# The filter ID can't be hardcoded reliably — LinkedIn uses opaque IDs that
+# may change. To wire it up:
+#   1. Open Sales Nav, turn on "Posted on LinkedIn" filter, copy the URL
+#   2. Run: python3 url_builder.py extract-filter '<paste url>'
+#   3. Copy the printed filter block into the constant below
+#
+# When None, the cascade stops after headcount + region splits and flags
+# any still-broad URLs as "exhausted — tighten keywords".
+POSTED_ON_LINKEDIN_FILTER = None
+
+
 REGION_IDS = {
     "US": ("103644278", "United States"),
     "AU": ("101452733", "Australia"),
@@ -139,11 +164,12 @@ def build_filter(filter_type: str, values: list[tuple[str, str]]) -> str:
 
 def build_sales_nav_url(
     keywords: str,
-    regions: list[str] = None,
-    seniority: list[str] = None,
-    headcount: list[str] = None,
-    functions: list[str] = None,
-    titles: list[str] = None,
+    regions: list[str] | None = None,
+    seniority: list[str] | None = None,
+    headcount: list[str] | None = None,
+    functions: list[str] | None = None,
+    titles: list[str] | None = None,
+    posted_on_linkedin: bool = False,
 ) -> str:
     filters = []
 
@@ -186,6 +212,16 @@ def build_sales_nav_url(
     if titles:
         vals = [(t, t) for t in titles]
         filters.append(build_filter("CURRENT_TITLE", vals))
+
+    if posted_on_linkedin:
+        if POSTED_ON_LINKEDIN_FILTER is None:
+            raise ValueError(
+                "POSTED_ON_LINKEDIN_FILTER is not configured. "
+                "Paste a Sales Nav URL with the 'Posted on LinkedIn' filter enabled, "
+                "then run: python3 url_builder.py extract-filter '<url>' "
+                "to get the filter block to paste into url_builder.py."
+            )
+        filters.append(POSTED_ON_LINKEDIN_FILTER)
 
     filters_str = ",".join(filters)
     raw_query = f"(spellCorrectionEnabled:true,filters:List({filters_str}),keywords:{keywords})"
@@ -260,3 +296,30 @@ if __name__ == "__main__":
         import json
         parsed = decode_sales_nav_url(sys.argv[2])
         print(json.dumps(parsed, indent=2))
+    elif cmd == "extract-filter":
+        if len(sys.argv) < 3:
+            print("Usage: python3 url_builder.py extract-filter '<sales_nav_url>'")
+            print("")
+            print("Paste a Sales Nav URL with a filter you want to extract the raw")
+            print("filter block for (e.g. 'Posted on LinkedIn'). Prints any filter")
+            print("blocks not already known to url_builder.py so you can paste them")
+            print("into POSTED_ON_LINKEDIN_FILTER (or add new filter support).")
+            sys.exit(1)
+        decoded = unquote(unquote(sys.argv[2]))
+        known = {"REGION", "SENIORITY_LEVEL", "COMPANY_HEADCOUNT", "FUNCTION",
+                 "CURRENT_TITLE", "INDUSTRY"}
+        block_pattern = r'\(type:(\w+),values:List\(.*?\)\)'
+        found_unknown = False
+        for match in re.finditer(block_pattern, decoded):
+            filter_type = match.group(1)
+            raw = match.group(0)
+            if filter_type not in known:
+                found_unknown = True
+                print(f"\nFound filter: {filter_type}")
+                print("Raw block (copy into url_builder.py):")
+                print(f'    POSTED_ON_LINKEDIN_FILTER = "{raw}"')
+                print()
+        if not found_unknown:
+            print("No unknown filter blocks found in that URL.")
+            print("Make sure the filter you want is actually toggled on in Sales Nav")
+            print("before copying the URL.")

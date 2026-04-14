@@ -12,6 +12,9 @@ Most people build Sales Nav URLs with 50K+ results and scrape the top 2,500. The
 - Breaking broad niches into specific sub-niches
 - Using boolean keyword construction (anchor AND sub-niche)
 - Applying headcount, seniority, and location filters
+- **Auto-cascade narrowing**: when a URL returns > 5K, it automatically splits
+  by headcount bucket, then US state, then adds the "Posted on LinkedIn" filter
+  as a last resort — matching how a human would narrow manually
 - Checking counts before scraping (free) and flagging URLs outside the sweet spot
 
 ## Quick Start
