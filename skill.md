@@ -52,7 +52,7 @@ Rules for keyword generation:
 - Use quotes around multi-word phrases: "HR software" not HR software
 - Think about what these people put in their LinkedIn titles/headlines
 
-### Step 3: Check Counts
+### Step 3: Check Counts (with auto-cascade narrowing)
 
 Run the check command with your generated JSON:
 
@@ -64,24 +64,30 @@ python3 prospector.py check --config config.yaml --input '<json_string>'
 This will:
 - Build a Sales Nav URL per sub-niche (anchor AND sub-niche keywords + default filters)
 - Call Vayne's free URL check for each
-- Print a table showing counts and whether each is in the 0-5K sweet spot
+- **Auto-cascade narrow** any sub-niche returning > max_results:
+  1. Split by headcount bucket (e.g. `11-50`, `51-200`, `201-500` become separate URLs)
+  2. If still too broad, split the US region into individual states
+  3. If still too broad, add the "Posted on LinkedIn" filter (when wired — see note below)
+  4. If still too broad after all splits, flag as "exhausted" — you'll need tighter keywords
+- Print a table showing every resulting URL with its count and status
 - Skip any sub-niches that were already scraped
 
-Present the results to the user as a clean table.
+The output JSON will contain one row per URL (a single sub-niche may yield many rows after cascade).
 
-### Step 4: Handle Out-of-Range Counts
+Present the results to the user as a clean table, grouped by parent sub-niche.
 
-For sub-niches > 5,000 results:
-- Suggest splitting by state (e.g. US -> US-CA, US-TX, US-NY separately)
-- Suggest narrowing headcount (e.g. remove 201-500)
-- Suggest adding title filters
+### Step 4: Handle Flagged Rows
 
-For sub-niches < 100 results:
-- Suggest broadening keywords (add more OR terms)
-- Suggest widening headcount range
-- Suggest expanding geography
+- **`good`** — in the 0–max_results sweet spot, ready to scrape
+- **`too_narrow`** — fewer than min_results, suggest broadening keywords
+- **`exhausted`** — cascade finished but still > max_results. Suggest tighter anchor keywords, title filters, or narrower seniority
+- **`error`** — Vayne returned an error (usually URL parse issue, rate limit, or auth)
 
-Ask the user which adjustments to make, then re-check.
+If POSTED_ON_LINKEDIN_FILTER is not yet wired in `url_builder.py`, the cascade stops one step early. To enable the final narrowing step, ask the user to:
+1. Open Sales Navigator and toggle the "Posted on LinkedIn" filter on
+2. Copy the URL
+3. Run: `python3 url_builder.py extract-filter '<url>'`
+4. Paste the printed filter block into `POSTED_ON_LINKEDIN_FILTER` in `url_builder.py`
 
 ### Step 5: Get Approval
 

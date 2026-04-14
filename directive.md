@@ -18,6 +18,44 @@ How to get there:
 
 When a URL returns > 5K, narrow it. When it returns < 100, broaden it.
 
+### Auto-cascade narrowing
+
+`prospector.py check` automatically narrows any sub-niche that returns more than
+`max_results_per_url` (default 5,000). The cascade runs in this order until the
+URL is in range or all axes are exhausted:
+
+1. **Headcount split** — if headcount has multiple buckets (e.g. `11-50`, `51-200`,
+   `201-500`), fan out into one URL per bucket
+2. **Region split** — if `region: "US"`, fan out into one URL per US state in
+   `US_STATES` (16 top states by population — add more in `url_builder.py`)
+3. **Posted on LinkedIn** — add the "Posted on LinkedIn" filter to narrow to
+   recently active posters (must wire `POSTED_ON_LINKEDIN_FILTER` in `url_builder.py`
+   first — see below)
+4. **Exhausted** — if the URL is still too broad after all splits, it's flagged
+   `exhausted`. The only fix is tighter keywords (the cascade can't reason about
+   language).
+
+A single sub-niche can produce many URLs. A broad B2B SaaS sub-niche might
+fan out to 3 headcounts × 16 states = 48 URLs. That's fine — the check is free.
+The run will use roughly one Vayne URL check per leaf + each intermediate node.
+
+The cascade respects two guardrails:
+- `URL_CHECK_SLEEP_SECONDS` (6.5s) — sleeps between Vayne calls to stay under
+  the 10 req/min rate limit on `/api/url_checks`
+- `MAX_URL_CHECKS_PER_RUN` (250) — hard cap on total checks per run
+
+### Wiring the "Posted on LinkedIn" filter
+
+This filter isn't hardcoded because LinkedIn uses opaque filter IDs that can
+change. To enable it:
+
+1. Open Sales Navigator, toggle on the "Posted on LinkedIn" filter
+2. Copy the URL
+3. Run: `python3 url_builder.py extract-filter '<url>'`
+4. Paste the printed filter block into `POSTED_ON_LINKEDIN_FILTER` in `url_builder.py`
+
+Once wired, the cascade will automatically use it as the final narrowing step.
+
 ## How Filters Work
 
 ### Keywords (Boolean Logic)
