@@ -85,8 +85,11 @@ REGION_IDS = {
 }
 
 SENIORITY_IDS = {
+    "Unpaid":              ("010", "Unpaid"),
+    "Training":            ("100", "Training"),
     "Entry":               ("110", "Entry"),
     "Senior":              ("120", "Senior"),
+    "Strategic":           ("130", "Strategic"),
     "Experienced Manager": ("210", "Experienced Manager"),
     "Director":            ("220", "Director"),
     "VP":                  ("300", "Vice President"),

@@ -28,11 +28,15 @@ defaults:
     - "11-50"
     - "51-200"
     - "201-500"
+  # Decision-maker set — matches the Sales Nav "decision makers" filter stack.
+  # Edit if your ICP needs a different seniority band.
   seniority:
     - "Director"
     - "VP"
     - "CXO"
     - "Owner"
+    - "Senior"
+    - "Strategic"
   region: "US"
   max_results_per_url: 5000
   min_results_per_url: 100
