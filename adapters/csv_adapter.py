@@ -1,13 +1,24 @@
 """CSV storage adapter — zero setup, works immediately."""
 
 import csv
+import json
 import os
 from .base import StorageAdapter
 
+# Stable tracking schema. `platform` and `filter_config` carry TAM metadata
+# (account vs lead, campaign_type, vertical, naics, region, persona) so nothing
+# is silently dropped when storage is CSV. Nested values are JSON-encoded.
 TRACKING_FIELDS = [
-    "niche", "sub_niche", "keywords", "sales_nav_url", "region",
-    "expected_results", "actual_scraped", "status", "scraped_at",
+    "niche", "sub_niche", "platform", "keywords", "sales_nav_url", "region",
+    "headcount", "expected_results", "actual_scraped", "status", "scraped_at",
+    "filter_config",
 ]
+
+
+def _flatten(record: dict) -> dict:
+    """JSON-encode nested dict/list values so they survive a CSV cell."""
+    return {k: (json.dumps(v) if isinstance(v, (dict, list)) else v)
+            for k, v in record.items()}
 
 
 class CSVAdapter(StorageAdapter):
@@ -25,7 +36,7 @@ class CSVAdapter(StorageAdapter):
             writer = csv.DictWriter(f, fieldnames=TRACKING_FIELDS, extrasaction="ignore")
             if not file_exists:
                 writer.writeheader()
-            writer.writerows(records)
+            writer.writerows(_flatten(r) for r in records)
         print(f"  Tracking: {len(records)} records written to {path}")
 
     def save_leads(self, niche: str, sub_niche: str, leads: list[dict]) -> None:
