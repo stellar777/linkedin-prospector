@@ -4,6 +4,8 @@
 
 Takes a niche (e.g. "B2B SaaS") and a location, breaks it into targetable sub-niches, builds LinkedIn Sales Navigator URLs with proper filters, validates result counts via Vayne API, scrapes leads, and stores everything organized by niche/sub-niche.
 
+For a whole client ICP at once (every vertical × region × persona), use the **Full TAM mode** below.
+
 ## The 0-5K Rule
 
 The #1 mistake people make with Sales Nav scraping: building URLs that return 50,000+ results. LinkedIn caps what you can scrape, so you get the top slice of a massive, unfocused pool. The leads are generic and reply rates are garbage.
@@ -12,7 +14,7 @@ The #1 mistake people make with Sales Nav scraping: building URLs that return 50
 
 How to get there:
 - **Headcount filters** narrow by company size (11-50 is different from 5,001-10,000)
-- **Location** narrows geography (US is broad, California is tight, San Francisco Bay Area is very tight)
+- **Location** narrows geography (US is broad, California is tight, a metro area is very tight)
 - **Keywords** should be specific to the sub-niche, not the parent niche
 - **Seniority** filters which level of person you're targeting
 
@@ -20,142 +22,114 @@ When a URL returns > 5K, narrow it. When it returns < 100, broaden it.
 
 ### Auto-cascade narrowing
 
-`prospector.py check` automatically narrows any sub-niche that returns more than
-`max_results_per_url` (default 5,000). The cascade runs in this order until the
-URL is in range or all axes are exhausted:
+`prospector.py check` automatically narrows any sub-niche that returns more than `max_results_per_url` (default 5,000). The cascade runs in this order until the URL is in range or all axes are exhausted:
 
-1. **Headcount split** — if headcount has multiple buckets (e.g. `11-50`, `51-200`,
-   `201-500`), fan out into one URL per bucket
-2. **Region split** — if `region: "US"`, fan out into one URL per US state in
-   `US_STATES` (16 top states by population — add more in `url_builder.py`)
-3. **Posted on LinkedIn** — add the "Posted on LinkedIn" filter to narrow to
-   recently active posters (must wire `POSTED_ON_LINKEDIN_FILTER` in `url_builder.py`
-   first — see below)
-4. **Exhausted** — if the URL is still too broad after all splits, it's flagged
-   `exhausted`. The only fix is tighter keywords (the cascade can't reason about
-   language).
-
-A single sub-niche can produce many URLs. A broad B2B SaaS sub-niche might
-fan out to 3 headcounts × 16 states = 48 URLs. That's fine — the check is free.
-The run will use roughly one Vayne URL check per leaf + each intermediate node.
+1. **Headcount split** — if headcount has multiple buckets, fan out into one URL per bucket
+2. **Region split** — if `region: "US"`, fan out into one URL per US state (all 50 are mapped in `url_builder.py` → `REGION_IDS`)
+3. **Posted on LinkedIn** — add the "Posted on LinkedIn" filter (id RPOL) to narrow to recently active posters. Already wired, no setup needed.
+4. **Exhausted** — if the URL is still too broad after all splits, it's flagged `exhausted`. The only fix is tighter keywords (the cascade can't reason about language).
 
 The cascade respects two guardrails:
-- `URL_CHECK_SLEEP_SECONDS` (6.5s) — sleeps between Vayne calls to stay under
-  the 10 req/min rate limit on `/api/url_checks`
+- `URL_CHECK_SLEEP_SECONDS` (6.5s) — sleeps between Vayne calls to stay under the 10 req/min rate limit on `/api/url_checks`
 - `MAX_URL_CHECKS_PER_RUN` (250) — hard cap on total checks per run
 
-### Wiring the "Posted on LinkedIn" filter
+The "Posted on LinkedIn" filter is wired in `url_builder.py`. If LinkedIn ever changes the ID, `python3 url_builder.py extract-filter '<url with the filter on>'` prints what a given URL uses so you can update the `POSTED_ON_LINKEDIN_FILTER` constant.
 
-This filter isn't hardcoded because LinkedIn uses opaque filter IDs that can
-change. To enable it:
+## Full TAM mode (`prospector.py tam`)
 
-1. Open Sales Navigator, toggle on the "Posted on LinkedIn" filter
-2. Copy the URL
-3. Run: `python3 url_builder.py extract-filter '<url>'`
-4. Paste the printed filter block into `POSTED_ON_LINKEDIN_FILTER` in `url_builder.py`
+The `check` flow above is niche-at-a-time. For a whole client ICP in one shot, use `tam`. It builds the entire URL universe from a `tam:` block in `config.yaml` (or `--input` JSON):
 
-Once wired, the cascade will automatically use it as the final narrowing step.
+- **Account URLs** = every `vertical × region` (returns companies)
+- **Lead URLs** = every `persona × vertical × region` (returns people)
+
+Then it free count-checks each URL (paced, budget-capped) and auto-slices any over 5K with the posted-on-linkedin filter. Example config:
+
+```yaml
+tam:
+  region_set: "us"          # us | north_america | global, or an explicit regions: list
+  campaign_type: "tam"
+  revenue: [5, 30]          # millions USD; comment out to skip
+  headcount: ["11-50", "51-200", "201-500"]
+  verticals:
+    commercial_hvac:
+      label: "Commercial HVAC"
+      naics: ["238220"]
+      keywords: '"commercial HVAC" OR "HVAC contractor" OR "mechanical contractor"'
+  personas:                 # omit for account URLs only
+    ops:
+      functions: ["Operations"]
+      seniority: ["Director", "VP", "CXO", "Owner"]
+```
+
+Run: `python3 prospector.py tam --config config.yaml` (add `--no-check` to build without sizing). Nested YAML needs PyYAML (`pip install pyyaml`), or pass the same spec as `--input` JSON. Rows save via the adapter with a `filter_config` (campaign_type, vertical, naics, region, revenue, headcount, persona) for downstream traceability.
+
+**Keyword rules for verticals (learned the hard way):**
+- Use BROAD anchor terms. LinkedIn matches company description text, not curated labels. `"CPG"` beats `"household cleaning brand"`.
+- No `&` characters, they break URL encoding. Use `and`.
+- Keep each keyword string under ~800 chars (Sales Nav URL length limit).
+- Free count-check one URL per vertical before committing the whole matrix.
+
+**Anti-patterns (do NOT do these):**
+- Pre-slicing into revenue × headcount × region bands up front (URL bloat — let the count-check decide which URLs actually need slicing).
+- Narrow synthesized keywords like `"first aid brand"` (returns 0 — LinkedIn matches natural vocabulary, not synthesized labels).
+- Scraping all leads first, then filtering. Scrape accounts first, qualify, then find people on the survivors.
 
 ## How Filters Work
 
 ### Keywords (Boolean Logic)
-LinkedIn supports boolean operators in the keyword field:
 - `"exact phrase"` — quotes for exact match
-- `OR` — match either term: `"HRIS" OR "HR software"`
+- `OR` — match either: `"HRIS" OR "HR software"`
 - `AND` — match both: `"B2B SaaS" AND "HRIS"`
 - Combine: `"B2B SaaS" AND ("HRIS" OR "HR software" OR "people operations")`
 
-The prospector uses **anchor AND sub-niche** construction:
-- Anchor = the user's niche keywords (always included)
-- Sub-niche = specific keywords for each segment
+The `check` flow uses **anchor AND sub-niche** construction (anchor = the niche, always included; sub-niche = specific keywords per segment). The `tam` flow uses one keyword string per vertical.
 
 ### Headcount
-| Code | Range |
-|------|-------|
-| self | Self-employed |
-| 1-10 | 1-10 employees |
-| 11-50 | 11-50 |
-| 51-200 | 51-200 |
-| 201-500 | 201-500 |
-| 501-1000 | 501-1,000 |
-| 1001-5000 | 1,001-5,000 |
-| 5001-10000 | 5,001-10,000 |
-| 10001+ | 10,001+ |
+`self, 1-10, 11-50, 51-200, 201-500, 501-1000, 1001-5000, 5001-10000, 10001+`. Default: 11-50, 51-200, 201-500.
 
-Default: 11-50, 51-200, 201-500. Edit in `config.yaml`.
-
-### Seniority
-| Level | Who |
-|-------|-----|
-| Entry | Junior roles |
-| Senior | Senior ICs |
-| Experienced Manager | Mid-management |
-| Director | Department heads |
-| VP | Vice Presidents |
-| CXO | C-suite |
-| Owner | Founders, Partners |
-
-Default: Director, VP, CXO, Owner. Edit in `config.yaml`.
+### Seniority (lead search only)
+`Entry, Senior, Experienced Manager, Director, VP, CXO, Owner`. Default: Director, VP, CXO, Owner.
 
 ### Regions
-Countries: US, CA, UK, AU, DE, FR, IN, SG, AE, NZ
-US States: US-CA, US-TX, US-NY, US-FL, US-IL, etc.
-US Metros: US-SF, US-NYC, US-LA, US-CHI, US-DFW, etc.
+Countries: US, CA, MX, UK, AU, NZ, DE, FR, IN, SG, AE.
+US states: all 50 (US-CA, US-TX, US-NY, ...).
+Canadian provinces: CA-BC, CA-ON, CA-QC, CA-AB, CA-MB, CA-NS, CA-SK.
+Convenience sets for the TAM `region_set`: `us` (50 states), `north_america` (US + provinces + MX), `global`. Full list in `url_builder.py` → `REGION_IDS`.
 
-Full list in `url_builder.py` → `REGION_IDS`.
+### Revenue + account vs lead search
+`build_sales_nav_url(revenue_min_max=(5, 30))` adds an ANNUAL_REVENUE band (millions USD). `is_account_search=True` returns companies (`/sales/search/company`) instead of people; seniority/function filters are lead-only.
 
 ## Vayne API
 
 Vayne scrapes LinkedIn Sales Navigator. You need an account and API token.
 
-**Key facts:**
 - **URL check is FREE** — always check before scraping
 - **Scraping costs 1 credit per lead**
-- Orders go through: initialization → pending → segmenting → scraping → finished
+- Orders go: initialization → pending → segmenting → scraping → finished
 - Results come as CSV (simple or advanced format)
-- Rate limit: 5 req/s burst, 60 req/min sustained
 
-Get your token: https://www.vayne.io → API Settings → Generate API Token
-Set it in `config.yaml` under `vayne_api_token`.
+Get your token: https://www.vayne.io → API Settings → Generate API Token. Set it in `config.yaml` under `vayne_api_token`.
 
 ## Storage Options
 
 ### CSV (Default)
-Zero setup. Results go to `./output/`:
-```
-output/
-├── tracking.csv
-├── b2b_saas/
-│   ├── hr_tech.csv
-│   ├── fintech.csv
-│   └── cybersecurity.csv
-└── dental_practices/
-    ├── cosmetic.csv
-    └── orthodontics.csv
-```
+Zero setup. Results go to `./output/` (a `tracking.csv` plus one CSV per sub-niche).
 
 ### Supabase
-Set `storage: "supabase"` in config. Requires `pip install supabase`.
-Tracking goes to `search_filters` table, leads to `leads` table.
+Set `storage: "supabase"` in config. Requires `pip install supabase`. Tracking upserts to the `search_filters` table on `(niche, sub_niche)`, so re-runs dedup automatically. Leads go to the `leads` table. Your table needs columns matching the tracking rows.
 
 ### Google Sheets
 Set `storage: "sheets"` in config. Requires `pip install google-api-python-client google-auth`.
-Creates a "Tracking" tab and a tab per sub-niche.
 
 ## Customization
 
-**Change default filters:** Edit `config.yaml` → `defaults` section.
-
-**Add new regions:** Edit `url_builder.py` → `REGION_IDS` dict. Find LinkedIn's region ID by inspecting a Sales Nav URL that uses that filter.
-
-**Change the storage schema:** Edit the relevant adapter in `adapters/`. The interface is simple: `save_tracking()`, `save_leads()`, `get_scraped()`.
-
-**Add a new storage backend:** Create a new adapter in `adapters/` that extends `StorageAdapter`, then add it to `adapters/__init__.py`.
+- **Default filters:** `config.yaml` → `defaults`.
+- **TAM spec:** `config.yaml` → `tam`.
+- **Add regions:** `url_builder.py` → `REGION_IDS`. Find a region's ID by inspecting a Sales Nav URL that uses it.
+- **Storage:** edit or add an adapter in `adapters/` (`save_tracking()`, `save_leads()`, `get_scraped()`).
 
 ## Tips
-
-- **Split by state when > 5K**: If "US" returns 8,000 results, try US-CA, US-TX, US-NY separately.
-- **Title filters for precision**: Add title filters to target specific roles beyond seniority level.
-- **Recent posters**: People who post on LinkedIn recently are more likely to respond.
-- **Check credits before batch scraping**: Run `python3 vayne_client.py credits` to see what you have.
-- **Start with CSV**: Get comfortable with the flow before wiring up Supabase or Sheets.
+- Split by state when > 5K, or let the cascade / TAM auto-slice do it.
+- People who post on LinkedIn recently are more likely to respond.
+- Run `python3 vayne_client.py credits` before batch scraping.
+- Start with CSV before wiring up Supabase or Sheets.

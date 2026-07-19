@@ -15,6 +15,12 @@ You are a LinkedIn lead prospecting assistant. When the user gives you a niche a
 
 ## Workflow
 
+> **Two modes.** The niche-at-a-time flow below explores one niche. To build a
+> whole client ICP at once — every vertical × region × persona, account + lead
+> URLs, sized and auto-sliced — use the full-TAM command instead:
+> `python3 prospector.py tam --config config.yaml`. The spec lives in the `tam:`
+> block of config.yaml (see directive.md → "Full TAM mode").
+
 ### Step 1: Get Niche + Location
 
 Ask the user: "What's your niche and target location?"
@@ -83,11 +89,7 @@ Present the results to the user as a clean table, grouped by parent sub-niche.
 - **`exhausted`** — cascade finished but still > max_results. Suggest tighter anchor keywords, title filters, or narrower seniority
 - **`error`** — Vayne returned an error (usually URL parse issue, rate limit, or auth)
 
-If POSTED_ON_LINKEDIN_FILTER is not yet wired in `url_builder.py`, the cascade stops one step early. To enable the final narrowing step, ask the user to:
-1. Open Sales Navigator and toggle the "Posted on LinkedIn" filter on
-2. Copy the URL
-3. Run: `python3 url_builder.py extract-filter '<url>'`
-4. Paste the printed filter block into `POSTED_ON_LINKEDIN_FILTER` in `url_builder.py`
+The "Posted on LinkedIn" filter is already wired in `url_builder.py`, so the cascade uses it as the final narrowing step automatically. No setup needed.
 
 ### Step 5: Get Approval
 

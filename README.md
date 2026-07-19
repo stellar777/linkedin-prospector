@@ -17,6 +17,20 @@ Most people build Sales Nav URLs with 50K+ results and scrape the top 2,500. The
   as a last resort — matching how a human would narrow manually
 - Checking counts before scraping (free) and flagging URLs outside the sweet spot
 
+## Full TAM Mode
+
+The niche-at-a-time flow is great for exploring. To build a whole client ICP universe in one shot, use `tam`:
+
+```bash
+python3 prospector.py tam --config config.yaml
+```
+
+Fill a `tam:` block in `config.yaml` (verticals, personas, region_set, revenue, headcount). It builds:
+- **Account URLs** — every `vertical × region` (returns companies)
+- **Lead URLs** — every `persona × vertical × region` (returns people)
+
+then free count-checks each and auto-slices any over 5K with the posted-on-linkedin filter. Region sets: `us` (all 50 states), `north_america` (US + provinces + MX), `global` — or an explicit `regions:` list. See `config.example.yaml` for the block and `directive.md` for the keyword rules. (Nested YAML needs `pip install pyyaml`, or pass the spec as `--input` JSON.)
+
 ## Quick Start
 
 1. **Drop this folder into your Claude Code project**
@@ -130,8 +144,14 @@ linkedin-prospector/
 The scripts also work standalone:
 
 ```bash
-# Build a URL
-python3 url_builder.py build --keywords '"data center construction"' --regions US --headcount 11-50,51-200
+# Build a lead-search URL
+python3 url_builder.py build --keywords '"data center construction"' --regions US-CA,US-TX --headcount 11-50,51-200
+
+# Build an account-search URL with a revenue band (millions USD)
+python3 url_builder.py build --keywords '"commercial HVAC"' --regions US-TX --revenue 5-30 --account
+
+# Build the full TAM universe (verticals x regions x personas) from config.yaml
+python3 prospector.py tam --config config.yaml
 
 # Check credits
 python3 vayne_client.py credits
@@ -139,7 +159,7 @@ python3 vayne_client.py credits
 # Check a URL count (free)
 python3 vayne_client.py check '<sales_nav_url>'
 
-# Check counts for sub-niches
+# Check counts for sub-niches (single niche, auto-cascade narrowing)
 python3 prospector.py check --config config.yaml --input '<json>'
 
 # Scrape approved sub-niches

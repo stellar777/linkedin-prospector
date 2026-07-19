@@ -1,9 +1,9 @@
 # LinkedIn Prospector Configuration
 # ----------------------------------
-# Fill in your API keys and choose a storage backend.
-# Edit default filters to match your targeting preferences.
+# Copy to config.yaml, add your Vayne token, and edit the defaults / tam block.
+# Nothing here is secret until you fill it in — config.yaml is gitignored.
 
-# Vayne API (required for scraping)
+# Vayne API (required for count-checks and scraping)
 # Get your token from https://www.vayne.io -> API Settings
 vayne_api_token: "your-vayne-token-here"
 
@@ -29,14 +29,50 @@ defaults:
     - "51-200"
     - "201-500"
   # Decision-maker set — matches the Sales Nav "decision makers" filter stack.
-  # Edit if your ICP needs a different seniority band.
   seniority:
     - "Director"
     - "VP"
     - "CXO"
     - "Owner"
-    - "Senior"
-    - "Strategic"
   region: "US"
   max_results_per_url: 5000
   min_results_per_url: 100
+
+# ── Full TAM mode (python3 prospector.py tam) ───────────────────────────
+# Builds the whole URL universe for a client ICP in one shot:
+#   account URLs = every (vertical × region)
+#   lead URLs    = every (persona × vertical × region)
+# then free count-checks each and auto-slices any URL over 5K.
+#
+# region_set: "us" (all 50 states) | "north_america" (US + CA provinces + MX)
+#             | "global". Or set an explicit `regions:` list of region codes
+#             (e.g. US-TX, US-CA, CA-ON) to target a subset.
+tam:
+  region_set: "us"
+  campaign_type: "tam"
+  # Revenue band in millions USD. Comment out to skip.
+  revenue: [5, 30]
+  headcount:
+    - "11-50"
+    - "51-200"
+    - "201-500"
+
+  # One entry per vertical. Use BROAD anchor terms (LinkedIn matches company
+  # description text, not curated labels). No "&" characters — use "and".
+  # Keep each keyword string under ~800 chars.
+  verticals:
+    commercial_hvac:
+      label: "Commercial HVAC"
+      naics: ["238220"]
+      keywords: '"commercial HVAC" OR "HVAC contractor" OR "heating and cooling" OR "mechanical contractor"'
+    # add more verticals here...
+
+  # One entry per lead persona (function stack × seniority). Omit the whole
+  # `personas` block to build account URLs only.
+  personas:
+    ops:
+      functions: ["Operations"]
+      seniority: ["Director", "VP", "CXO", "Owner"]
+    # finance:
+    #   functions: ["Finance"]
+    #   seniority: ["Director", "VP", "CXO", "Owner"]

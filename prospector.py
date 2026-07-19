@@ -20,7 +20,9 @@ import sys
 import time
 from datetime import datetime, timezone
 
-from url_builder import build_sales_nav_url, US_STATES, POSTED_ON_LINKEDIN_FILTER
+from url_builder import (
+    build_sales_nav_url, US_STATES, POSTED_ON_LINKEDIN_FILTER, REGION_SETS, TAM_US,
+)
 from vayne_client import VayneClient
 from adapters import load_adapter
 
@@ -397,11 +399,162 @@ def cmd_status(args):
         print(f"  {r.get('niche', '-'):<18} {r.get('sub_niche', '-'):<23} {r.get('status', '-'):<10}")
 
 
+# ── Full TAM matrix (verticals × regions × revenue × headcount × personas) ──
+
+def _load_tam_spec(config: dict, input_data: dict):
+    """Resolve the TAM spec from --input JSON (takes priority) or config['tam']."""
+    tam = (input_data or {}).get("tam") or config.get("tam", {}) or {}
+    verticals = tam.get("verticals") or {}
+    personas = tam.get("personas") or {}
+    regions = tam.get("regions")
+    if not regions:
+        regions = REGION_SETS.get(str(tam.get("region_set", "us")).lower(), TAM_US)
+    revenue = tam.get("revenue")
+    revenue = (int(revenue[0]), int(revenue[1])) if isinstance(revenue, (list, tuple)) and len(revenue) == 2 else None
+    headcount = tam.get("headcount") or config.get("defaults", {}).get(
+        "headcount", ["11-50", "51-200", "201-500"])
+    campaign_type = tam.get("campaign_type", "tam")
+    return verticals, personas, regions, revenue, headcount, campaign_type
+
+
+def _vert_bits(vcfg):
+    if isinstance(vcfg, dict):
+        return vcfg.get("keywords", ""), vcfg.get("naics", [])
+    return str(vcfg), []
+
+
+def _build_tam_rows(verticals, personas, regions, revenue, headcount, campaign_type):
+    """Account URLs = vertical × region. Lead URLs = persona × vertical × region."""
+    rows = []
+    for vslug, vcfg in verticals.items():
+        kw, naics = _vert_bits(vcfg)
+        for region in regions:
+            url = build_sales_nav_url(keywords=kw, regions=[region], headcount=headcount,
+                                      revenue_min_max=revenue, is_account_search=True)
+            rows.append({
+                "niche": vslug, "sub_niche": f"tam__{region.lower()}",
+                "platform": "sales_nav_account", "sales_nav_url": url,
+                "keywords": kw, "region": region, "headcount": ",".join(headcount),
+                "filter_config": {
+                    "campaign_type": campaign_type, "vertical": vslug, "naics": naics,
+                    "region": region,
+                    "revenue_min_max_usd_millions": list(revenue) if revenue else None,
+                    "headcount": headcount, "keywords": kw, "is_account_search": True,
+                },
+                "expected_results": 0, "actual_scraped": 0, "status": "planned",
+            })
+    for pslug, pcfg in personas.items():
+        functions = pcfg.get("functions", []) if isinstance(pcfg, dict) else []
+        seniority = pcfg.get("seniority", []) if isinstance(pcfg, dict) else []
+        for vslug, vcfg in verticals.items():
+            kw, naics = _vert_bits(vcfg)
+            for region in regions:
+                url = build_sales_nav_url(keywords=kw, regions=[region], seniority=seniority,
+                                          functions=functions, headcount=headcount,
+                                          is_account_search=False)
+                rows.append({
+                    "niche": vslug, "sub_niche": f"tam_lead__{pslug}__{region.lower()}",
+                    "platform": "sales_nav", "sales_nav_url": url,
+                    "keywords": kw, "region": region, "headcount": ",".join(headcount),
+                    "filter_config": {
+                        "campaign_type": campaign_type, "vertical": vslug, "naics": naics,
+                        "region": region, "headcount": headcount, "keywords": kw,
+                        "is_account_search": False, "persona": pslug,
+                        "functions": functions, "seniority": seniority,
+                    },
+                    "expected_results": 0, "actual_scraped": 0, "status": "planned",
+                })
+    return rows
+
+
+def _size_tam_rows(rows, vayne, budget, max_results=5000, min_results=100):
+    """Free count-check each planned URL (paced); auto-slice >5K via posted-on-linkedin."""
+    for r in rows:
+        if budget["checks_used"] >= budget["max_checks"]:
+            continue  # left as "planned" for a follow-up run
+        count = vayne.check_url(r["sales_nav_url"])
+        budget["checks_used"] += 1
+        time.sleep(URL_CHECK_SLEEP_SECONDS)
+        r["expected_results"] = count if count is not None else -1
+        if count is None or count < 0:
+            r["status"] = "error"
+        elif count < min_results:
+            r["status"] = "too_few"
+        elif count <= max_results:
+            r["status"] = "in_range"
+        else:
+            fc = r["filter_config"]
+            rev = tuple(fc["revenue_min_max_usd_millions"]) if fc.get("revenue_min_max_usd_millions") else None
+            sliced = build_sales_nav_url(
+                keywords=fc["keywords"], regions=[fc["region"]],
+                seniority=fc.get("seniority"), functions=fc.get("functions"),
+                headcount=fc["headcount"], revenue_min_max=rev,
+                is_account_search=fc["is_account_search"], posted_on_linkedin=True,
+            )
+            if budget["checks_used"] < budget["max_checks"]:
+                c2 = vayne.check_url(sliced)
+                budget["checks_used"] += 1
+                time.sleep(URL_CHECK_SLEEP_SECONDS)
+                r["sales_nav_url"] = sliced
+                r["filter_config"]["posted_on_linkedin"] = True
+                r["expected_results"] = c2 if c2 is not None else -1
+                r["status"] = "in_range" if (c2 is not None and 0 <= c2 <= max_results) else "exceeds_5000"
+            else:
+                r["status"] = "exceeds_5000"
+    return rows
+
+
+def cmd_tam(args):
+    """Build the full TAM URL universe: verticals × regions [× personas] → account + lead URLs.
+
+    Reads the `tam:` block from config.yaml (or --input JSON). Free count-checks
+    up to the per-run budget and auto-slices any URL over 5K. Saves via the adapter.
+    """
+    config = load_yaml_config(args.config)
+    input_data = json.loads(args.input) if args.input else {}
+    verticals, personas, regions, revenue, headcount, campaign_type = _load_tam_spec(config, input_data)
+    if not verticals:
+        print("No verticals found. Add a `tam.verticals` block to config.yaml "
+              "(see config.example.yaml) or pass --input '{\"tam\": {...}}'.")
+        return
+
+    rows = _build_tam_rows(verticals, personas, regions, revenue, headcount, campaign_type)
+    n_acct = sum(1 for r in rows if r["filter_config"]["is_account_search"])
+    print(f"\nTAM universe: {len(verticals)} verticals × {len(regions)} regions × {len(personas)} personas")
+    print(f"Built {len(rows)} URLs  ({n_acct} account, {len(rows) - n_acct} lead)")
+    if revenue:
+        print(f"Revenue band: ${revenue[0]}M-${revenue[1]}M   Headcount: {','.join(headcount)}")
+
+    if not args.no_check:
+        vayne = VayneClient(token=config.get("vayne_api_token"))
+        budget = {"checks_used": 0, "max_checks": MAX_URL_CHECKS_PER_RUN}
+        print(f"\nFree count-check (up to {MAX_URL_CHECKS_PER_RUN} URLs this run, "
+              f"{URL_CHECK_SLEEP_SECONDS}s apart)...")
+        _size_tam_rows(rows, vayne, budget)
+        buckets = {}
+        for r in rows:
+            buckets[r["status"]] = buckets.get(r["status"], 0) + 1
+        total = sum(r["expected_results"] for r in rows
+                    if r["status"] == "in_range" and r["expected_results"] > 0)
+        print("  " + "  ".join(f"{k}={v}" for k, v in sorted(buckets.items())))
+        print(f"  addressable (in_range URLs): ~{total:,}")
+        print(f"  Vayne checks used: {budget['checks_used']}")
+
+    adapter = load_adapter(config)
+    adapter.save_tracking(rows)
+    print(f"\nSaved {len(rows)} URL rows via the {config.get('storage', 'csv')} adapter.")
+    if any(r["status"] == "planned" for r in rows):
+        print("Some URLs are still `planned` (hit the per-run check budget). "
+              "Re-run `python3 prospector.py tam` to continue sizing them.")
+
+
 def main():
     parser = argparse.ArgumentParser(description="LinkedIn Prospector")
-    parser.add_argument("command", choices=["check", "scrape", "status"])
+    parser.add_argument("command", choices=["check", "scrape", "status", "tam"])
     parser.add_argument("--config", default="config.yaml")
     parser.add_argument("--input", default=None)
+    parser.add_argument("--no-check", action="store_true",
+                        help="tam: build + save URLs without the free count-check pass")
     args = parser.parse_args()
 
     if args.command == "check":
@@ -410,6 +563,8 @@ def main():
         cmd_scrape(args)
     elif args.command == "status":
         cmd_status(args)
+    elif args.command == "tam":
+        cmd_tam(args)
 
 
 if __name__ == "__main__":
